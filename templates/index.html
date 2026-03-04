@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Shopping List</title>
+    <style>
+      body { font-family: sans-serif; max-width: 700px; margin: 40px auto; }
+      form { margin-bottom: 16px; }
+      li { margin: 8px 0; display: flex; gap: 10px; align-items: center; }
+      .name { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <h1>Shopping List</h1>
+
+    <form action="/items" method="post">
+      <input name="name" placeholder="ex: lapte" required />
+      <button type="submit">Add</button>
+    </form>
+
+    <ul>
+      {% for item in items %}
+        <li>
+          <span class="name">{{ item.name }}</span>
+          <form action="/items/{{ item.id }}/delete" method="post" style="margin:0">
+            <button type="submit">Delete</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+
+    <p>
+      API docs (Swagger): <a href="/docs">/docs</a>
+    </p>
+  </body>
+</html>
