@@ -2,12 +2,12 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
-from app.db import engine, SessionLocal
-from app.models import Base, Item
+from db import engine, SessionLocal
+from models import Base, Item
 
 app = FastAPI(title="Shopping List")
 
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory="templates")
 
 @app.on_event("startup")
 def startup():
@@ -35,7 +35,6 @@ def delete_item(item_id: int):
             db.commit()
     return RedirectResponse(url="/", status_code=303)
 
-# API endpoints (pentru Swagger)
 @app.get("/api/items")
 def api_list_items():
     with SessionLocal() as db:
