@@ -4,3 +4,5 @@ sqlalchemy
 jinja2
 python-multipart
 psycopg2-binary
+PyJWT[crypto]
+requests
