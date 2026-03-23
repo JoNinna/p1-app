@@ -105,7 +105,7 @@ def get_user_from_token(
 ):
     correlation_id = get_correlation_id(request)
 
-    # 1. Încearcă mai întâi Bearer token-ul, dacă există
+    # 1. Încearcă Bearer token-ul, dacă există
     if credentials and credentials.scheme.lower() == "bearer":
         payload = validate_token(credentials.credentials)
 
@@ -121,32 +121,46 @@ def get_user_from_token(
             .get("roles", [])
         )
 
-        user_context = {
-            "username": username,
-            "roles": roles,
-            "correlation_id": correlation_id,
-        }
+        if username:
+            user_context = {
+                "username": username,
+                "roles": roles,
+                "correlation_id": correlation_id,
+            }
+            request.state.user = user_context
+            return user_context
 
-        request.state.user = user_context
-        return user_context
-
-    # 2. Fallback: citește headerele trimise de oauth2-proxy prin ingress
+    # 2. Fallback pe headerele de la oauth2-proxy
     username = (
         request.headers.get("x-auth-request-preferred-username")
+        or request.headers.get("x-forwarded-preferred-username")
         or request.headers.get("x-auth-request-email")
+        or request.headers.get("x-forwarded-email")
         or request.headers.get("x-auth-request-user")
+        or request.headers.get("x-forwarded-user")
     )
 
-    groups_header = request.headers.get("x-auth-request-groups", "")
+    groups_header = (
+        request.headers.get("x-auth-request-groups")
+        or request.headers.get("x-forwarded-groups")
+        or ""
+    )
+
     raw_groups = [g.strip() for g in groups_header.split(",") if g.strip()]
 
     roles = []
+    prefix = f"role:{OIDC_CLIENT_ID}:"
     for group in raw_groups:
-        prefix = f"role:{OIDC_CLIENT_ID}:"
         if group.startswith(prefix):
             roles.append(group[len(prefix):])
 
     if username:
+        logger.info(
+            "header auth context | user=%s groups=%s roles=%s",
+            username,
+            raw_groups,
+            roles,
+        )
         user_context = {
             "username": username,
             "roles": roles,
