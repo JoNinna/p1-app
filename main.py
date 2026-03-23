@@ -136,19 +136,14 @@ def get_user_from_token(
     correlation_id = get_correlation_id(request)
 
     logger.info(
-    "auth debug | has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
-    bool(request.headers.get("authorization")),
-    bool(request.headers.get("x-auth-request-access-token")),
-    request.headers.get("x-auth-request-preferred-username")
-    or request.headers.get("x-auth-request-user"),
+        "auth debug | has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
+        bool(request.headers.get("authorization")),
+        bool(request.headers.get("x-auth-request-access-token")),
+        request.headers.get("x-auth-request-preferred-username")
+        or request.headers.get("x-auth-request-user"),
     )
-  
-    # 1. Bearer token direct
-    if credentials and credentials.scheme.lower() == "bearer":
-        payload = validate_token(credentials.credentials)
-        return build_user_context(request, payload, correlation_id)
 
-    # 2. Access token forwardat de oauth2-proxy prin ingress
+    # 1. Preferă access token-ul forwardat de oauth2-proxy
     forwarded_access_token = (
         request.headers.get("x-auth-request-access-token")
         or request.headers.get("x-forwarded-access-token")
@@ -156,6 +151,11 @@ def get_user_from_token(
 
     if forwarded_access_token:
         payload = validate_token(forwarded_access_token)
+        return build_user_context(request, payload, correlation_id)
+
+    # 2. Abia apoi încearcă Authorization: Bearer ...
+    if credentials and credentials.scheme.lower() == "bearer":
+        payload = validate_token(credentials.credentials)
         return build_user_context(request, payload, correlation_id)
 
     # 3. Fallback doar pentru identitate, fără roluri
