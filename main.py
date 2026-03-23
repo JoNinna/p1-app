@@ -99,38 +99,66 @@ def validate_token(token: str):
         )
 
 
+def extract_roles_from_payload(payload: dict) -> list[str]:
+    return (
+        payload.get("resource_access", {})
+        .get(OIDC_CLIENT_ID, {})
+        .get("roles", [])
+    )
+
+
+def build_user_context(request: Request, payload: dict, correlation_id: str):
+    username = (
+        payload.get("preferred_username")
+        or payload.get("email")
+        or payload.get("sub")
+    )
+    roles = extract_roles_from_payload(payload)
+
+    logger.info(
+        "token auth context | user=%s roles=%s",
+        username,
+        roles,
+    )
+
+    user_context = {
+        "username": username,
+        "roles": roles,
+        "correlation_id": correlation_id,
+    }
+    request.state.user = user_context
+    return user_context
+
 def get_user_from_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     correlation_id = get_correlation_id(request)
 
-    # 1. Încearcă Bearer token-ul, dacă există
+    logger.info(
+    "auth debug | has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
+    bool(request.headers.get("authorization")),
+    bool(request.headers.get("x-auth-request-access-token")),
+    request.headers.get("x-auth-request-preferred-username")
+    or request.headers.get("x-auth-request-user"),
+    )
+  
+    # 1. Bearer token direct
     if credentials and credentials.scheme.lower() == "bearer":
         payload = validate_token(credentials.credentials)
+        return build_user_context(request, payload, correlation_id)
 
-        username = (
-            payload.get("preferred_username")
-            or payload.get("email")
-            or payload.get("sub")
-        )
+    # 2. Access token forwardat de oauth2-proxy prin ingress
+    forwarded_access_token = (
+        request.headers.get("x-auth-request-access-token")
+        or request.headers.get("x-forwarded-access-token")
+    )
 
-        roles = (
-            payload.get("resource_access", {})
-            .get(OIDC_CLIENT_ID, {})
-            .get("roles", [])
-        )
+    if forwarded_access_token:
+        payload = validate_token(forwarded_access_token)
+        return build_user_context(request, payload, correlation_id)
 
-        if username:
-            user_context = {
-                "username": username,
-                "roles": roles,
-                "correlation_id": correlation_id,
-            }
-            request.state.user = user_context
-            return user_context
-
-    # 2. Fallback pe headerele de la oauth2-proxy
+    # 3. Fallback doar pentru identitate, fără roluri
     username = (
         request.headers.get("x-auth-request-preferred-username")
         or request.headers.get("x-forwarded-preferred-username")
@@ -140,30 +168,14 @@ def get_user_from_token(
         or request.headers.get("x-forwarded-user")
     )
 
-    groups_header = (
-        request.headers.get("x-auth-request-groups")
-        or request.headers.get("x-forwarded-groups")
-        or ""
-    )
-
-    raw_groups = [g.strip() for g in groups_header.split(",") if g.strip()]
-
-    roles = []
-    prefix = f"role:{OIDC_CLIENT_ID}:"
-    for group in raw_groups:
-        if group.startswith(prefix):
-            roles.append(group[len(prefix):])
-
     if username:
         logger.info(
-            "header auth context | user=%s groups=%s roles=%s",
+            "header auth context without token | user=%s",
             username,
-            raw_groups,
-            roles,
         )
         user_context = {
             "username": username,
-            "roles": roles,
+            "roles": [],
             "correlation_id": correlation_id,
         }
         request.state.user = user_context
