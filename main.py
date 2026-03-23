@@ -105,41 +105,66 @@ def get_user_from_token(
 ):
     correlation_id = get_correlation_id(request)
 
-    if not credentials or credentials.scheme.lower() != "bearer":
-        logger.warning(
-            "unauthorized | correlation_id=%s path=%s method=%s reason=missing_token",
-            correlation_id,
-            request.url.path,
-            request.method,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing bearer token",
+    # 1. Încearcă mai întâi Bearer token-ul, dacă există
+    if credentials and credentials.scheme.lower() == "bearer":
+        payload = validate_token(credentials.credentials)
+
+        username = (
+            payload.get("preferred_username")
+            or payload.get("email")
+            or payload.get("sub")
         )
 
-    payload = validate_token(credentials.credentials)
+        roles = (
+            payload.get("resource_access", {})
+            .get(OIDC_CLIENT_ID, {})
+            .get("roles", [])
+        )
 
+        user_context = {
+            "username": username,
+            "roles": roles,
+            "correlation_id": correlation_id,
+        }
+
+        request.state.user = user_context
+        return user_context
+
+    # 2. Fallback: citește headerele trimise de oauth2-proxy prin ingress
     username = (
-        payload.get("preferred_username")
-        or payload.get("email")
-        or payload.get("sub")
+        request.headers.get("x-auth-request-preferred-username")
+        or request.headers.get("x-auth-request-email")
+        or request.headers.get("x-auth-request-user")
     )
 
-    roles = (
-        payload.get("resource_access", {})
-        .get(OIDC_CLIENT_ID, {})
-        .get("roles", [])
+    groups_header = request.headers.get("x-auth-request-groups", "")
+    raw_groups = [g.strip() for g in groups_header.split(",") if g.strip()]
+
+    roles = []
+    for group in raw_groups:
+        prefix = f"role:{OIDC_CLIENT_ID}:"
+        if group.startswith(prefix):
+            roles.append(group[len(prefix):])
+
+    if username:
+        user_context = {
+            "username": username,
+            "roles": roles,
+            "correlation_id": correlation_id,
+        }
+        request.state.user = user_context
+        return user_context
+
+    logger.warning(
+        "unauthorized | correlation_id=%s path=%s method=%s reason=missing_identity",
+        correlation_id,
+        request.url.path,
+        request.method,
     )
-
-    user_context = {
-        "username": username,
-        "roles": roles,
-        "correlation_id": correlation_id,
-    }
-
-    request.state.user = user_context
-    return user_context
-
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Missing authentication context",
+    )
 
 def require_roles(*allowed_roles):
     def checker(user=Depends(get_user_from_token)):
@@ -165,8 +190,7 @@ def require_roles(*allowed_roles):
 async def http_exception_handler(request: Request, exc: HTTPException):
     if request.url.path.startswith("/api/"):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    raise exc
-
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
