@@ -20,7 +20,7 @@ app = FastAPI(title="Shopping List")
 templates = Jinja2Templates(directory="templates")
 security = HTTPBearer(auto_error=False)
 
-OIDC_ISSUER = os.getenv("OIDC_ISSUER", "http://auth.local/realms/devops-lvlup")
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "http://keycloak.default.svc.cluster.local/realms/devops-lvlup")
 OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "shopping-app")
 
 logging.basicConfig(
