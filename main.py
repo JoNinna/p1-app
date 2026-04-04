@@ -3,6 +3,8 @@ import os
 import uuid
 from functools import lru_cache
 
+from middleware import RequestContextMiddleware
+
 import jwt
 import requests
 from fastapi import FastAPI, Request, Form, HTTPException, Depends, status
@@ -17,6 +19,7 @@ from models import Base, Item
 print("Loaded RBAC version of main.py file")
 
 app = FastAPI(title="Shopping List")
+app.add_middleware(RequestContextMiddleware)
 templates = Jinja2Templates(directory="templates")
 security = HTTPBearer(auto_error=False)
 
@@ -35,10 +38,11 @@ def startup():
     Base.metadata.create_all(bind=engine)
     logger.info("app started | issuer=%s client_id=%s", OIDC_ISSUER, OIDC_CLIENT_ID)
 
-
 def get_correlation_id(request: Request) -> str:
-    return request.headers.get("x-correlation-id") or str(uuid.uuid4())
+    return request.state.correlation_id
 
+def get_run_id(request: Request) -> str | None:
+    return getattr(request.state, "run_id", None)
 
 @lru_cache(maxsize=1)
 def fetch_oidc_config():
