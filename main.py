@@ -4,6 +4,9 @@ import uuid
 from functools import lru_cache
 
 from middleware import RequestContextMiddleware
+from opentelemetry import trace
+from opentelemetry.trace import format_trace_id
+from observability import setup_otel
 
 import jwt
 import requests
@@ -16,10 +19,9 @@ from sqlalchemy import select
 from db import engine, SessionLocal
 from models import Base, Item
 
-print("Loaded RBAC version of main.py file")
-
 app = FastAPI(title="Shopping List")
 app.add_middleware(RequestContextMiddleware)
+setup_otel(app, engine)
 templates = Jinja2Templates(directory="templates")
 security = HTTPBearer(auto_error=False)
 
@@ -30,8 +32,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
+
 logger = logging.getLogger("shopping-app")
 
+tracer = trace.get_tracer("shopping-app")
 
 @app.on_event("startup")
 def startup():
@@ -226,7 +230,11 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 def home(request: Request):
     with SessionLocal() as db:
         items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
-    return templates.TemplateResponse("index.html", {"request": request, "items": items})
+    return templates.TemplateResponse(
+        name="index.html",
+        request=request,
+        context={"items": items},
+    )
 
 
 @app.post("/items")
@@ -280,8 +288,14 @@ def api_list_items(
     request: Request,
     user=Depends(require_roles("reader", "writer", "admin")),
 ):
-    with SessionLocal() as db:
-        items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
+    with tracer.start_as_current_span("list_items_logic") as span:
+        span.set_attribute("app.correlation_id", request.state.correlation_id)
+        if request.state.run_id:
+            span.set_attribute("app.run_id", request.state.run_id)
+        span.set_attribute("app.user", user["username"])
+
+        with SessionLocal() as db:
+            items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
 
     logger.info(
         "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",

@@ -4,6 +4,8 @@ import logging
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
+from opentelemetry import trace
+from opentelemetry.trace import format_trace_id
 
 logger = logging.getLogger("shopping-app")
 
@@ -20,20 +22,37 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
         status_code = 500
         error_class = None
+        response = None
 
         try:
             response = await call_next(request)
             status_code = response.status_code
+            return response
         except Exception as exc:
             error_class = exc.__class__.__name__
             raise
         finally:
             latency_ms = round((time.time() - start_time) * 1000, 2)
 
+            span = trace.get_current_span()
+            span_ctx = span.get_span_context()
+
+            trace_id = None
+            if span_ctx and span_ctx.trace_id:
+                trace_id = format_trace_id(span_ctx.trace_id)
+
+            if span is not None:
+                span.set_attribute("app.correlation_id", correlation_id)
+                span.set_attribute("http.request.method", request.method)
+                span.set_attribute("url.path", request.url.path)
+                if run_id:
+                    span.set_attribute("app.run_id", run_id)
+
             logger.info(
-                "request completed | run_id=%s correlation_id=%s method=%s path=%s status_code=%s latency_ms=%s error_class=%s",
+                "request completed | run_id=%s correlation_id=%s trace_id=%s method=%s path=%s status_code=%s latency_ms=%s error_class=%s",
                 run_id,
                 correlation_id,
+                trace_id,
                 request.method,
                 request.url.path,
                 status_code,
@@ -41,5 +60,5 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 error_class,
             )
 
-        response.headers["X-Correlation-Id"] = correlation_id
-        return response
+            if response is not None:
+                response.headers["X-Correlation-Id"] = correlation_id
