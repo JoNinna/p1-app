@@ -1,12 +1,6 @@
 import logging
 import os
-import uuid
 from functools import lru_cache
-
-from middleware import RequestContextMiddleware
-from opentelemetry import trace
-from opentelemetry.trace import format_trace_id
-from observability import setup_otel
 
 import jwt
 import requests
@@ -14,39 +8,49 @@ from fastapi import FastAPI, Request, Form, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.templating import Jinja2Templates
+from opentelemetry import trace
 from sqlalchemy import select
 
 from db import engine, SessionLocal
+from middleware import RequestContextMiddleware
 from models import Base, Item
+from observability import setup_otel
 
 app = FastAPI(title="Shopping List")
 app.add_middleware(RequestContextMiddleware)
 setup_otel(app, engine)
+
 templates = Jinja2Templates(directory="templates")
 security = HTTPBearer(auto_error=False)
 
-OIDC_ISSUER = os.getenv("OIDC_ISSUER", "http://keycloak.default.svc.cluster.local/realms/devops-lvlup")
+OIDC_ISSUER = os.getenv(
+    "OIDC_ISSUER",
+    "http://keycloak.default.svc.cluster.local/realms/devops-lvlup",
+)
 OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "shopping-app")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-
 logger = logging.getLogger("shopping-app")
 
 tracer = trace.get_tracer("shopping-app")
+
 
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
     logger.info("app started | issuer=%s client_id=%s", OIDC_ISSUER, OIDC_CLIENT_ID)
 
+
 def get_correlation_id(request: Request) -> str:
     return request.state.correlation_id
 
+
 def get_run_id(request: Request) -> str | None:
     return getattr(request.state, "run_id", None)
+
 
 @lru_cache(maxsize=1)
 def fetch_oidc_config():
@@ -122,9 +126,12 @@ def build_user_context(request: Request, payload: dict, correlation_id: str):
         or payload.get("sub")
     )
     roles = extract_roles_from_payload(payload)
+    run_id = get_run_id(request)
 
     logger.info(
-        "token auth context | user=%s roles=%s",
+        "token auth context | run_id=%s correlation_id=%s user=%s roles=%s",
+        run_id,
+        correlation_id,
         username,
         roles,
     )
@@ -133,25 +140,29 @@ def build_user_context(request: Request, payload: dict, correlation_id: str):
         "username": username,
         "roles": roles,
         "correlation_id": correlation_id,
+        "run_id": run_id,
     }
     request.state.user = user_context
     return user_context
+
 
 def get_user_from_token(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     correlation_id = get_correlation_id(request)
+    run_id = get_run_id(request)
 
     logger.info(
-        "auth debug | has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
+        "auth debug | run_id=%s correlation_id=%s has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
+        run_id,
+        correlation_id,
         bool(request.headers.get("authorization")),
         bool(request.headers.get("x-auth-request-access-token")),
         request.headers.get("x-auth-request-preferred-username")
         or request.headers.get("x-auth-request-user"),
     )
 
-    # 1. Preferă access token-ul forwardat de oauth2-proxy
     forwarded_access_token = (
         request.headers.get("x-auth-request-access-token")
         or request.headers.get("x-forwarded-access-token")
@@ -161,12 +172,10 @@ def get_user_from_token(
         payload = validate_token(forwarded_access_token)
         return build_user_context(request, payload, correlation_id)
 
-    # 2. Abia apoi încearcă Authorization: Bearer ...
     if credentials and credentials.scheme.lower() == "bearer":
         payload = validate_token(credentials.credentials)
         return build_user_context(request, payload, correlation_id)
 
-    # 3. Fallback doar pentru identitate, fără roluri
     username = (
         request.headers.get("x-auth-request-preferred-username")
         or request.headers.get("x-forwarded-preferred-username")
@@ -178,19 +187,23 @@ def get_user_from_token(
 
     if username:
         logger.info(
-            "header auth context without token | user=%s",
+            "header auth context without token | run_id=%s correlation_id=%s user=%s",
+            run_id,
+            correlation_id,
             username,
         )
         user_context = {
             "username": username,
             "roles": [],
             "correlation_id": correlation_id,
+            "run_id": run_id,
         }
         request.state.user = user_context
         return user_context
 
     logger.warning(
-        "unauthorized | correlation_id=%s path=%s method=%s reason=missing_identity",
+        "unauthorized | run_id=%s correlation_id=%s path=%s method=%s reason=missing_identity",
+        run_id,
         correlation_id,
         request.url.path,
         request.method,
@@ -200,12 +213,14 @@ def get_user_from_token(
         detail="Missing authentication context",
     )
 
+
 def require_roles(*allowed_roles):
     def checker(user=Depends(get_user_from_token)):
         user_roles = user["roles"]
         if not any(role in user_roles for role in allowed_roles):
             logger.warning(
-                "forbidden | correlation_id=%s user=%s roles=%s required_roles=%s",
+                "forbidden | run_id=%s correlation_id=%s user=%s roles=%s required_roles=%s",
+                user.get("run_id"),
                 user["correlation_id"],
                 user["username"],
                 user_roles,
@@ -223,13 +238,21 @@ def require_roles(*allowed_roles):
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     if request.url.path.startswith("/api/"):
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     with SessionLocal() as db:
         items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
+
     return templates.TemplateResponse(
         name="index.html",
         request=request,
@@ -248,7 +271,8 @@ def add_item(
         db.commit()
 
     logger.info(
-        "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        user.get("run_id"),
         user["correlation_id"],
         user["username"],
         user["roles"],
@@ -272,7 +296,8 @@ def delete_item(
             db.commit()
 
     logger.info(
-        "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        user.get("run_id"),
         user["correlation_id"],
         user["username"],
         user["roles"],
@@ -298,7 +323,8 @@ def api_list_items(
             items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
 
     logger.info(
-        "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        user.get("run_id"),
         user["correlation_id"],
         user["username"],
         user["roles"],
@@ -324,7 +350,8 @@ def api_add_item(
         db.commit()
 
     logger.info(
-        "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        user.get("run_id"),
         user["correlation_id"],
         user["username"],
         user["roles"],
@@ -348,7 +375,8 @@ def api_delete_item(
             db.commit()
 
     logger.info(
-        "allowed | correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
+        user.get("run_id"),
         user["correlation_id"],
         user["username"],
         user["roles"],
