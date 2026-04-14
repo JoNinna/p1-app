@@ -12,6 +12,7 @@ from opentelemetry import trace
 from sqlalchemy import select
 
 from db import engine, SessionLocal
+from logging_config import setup_logging
 from middleware import RequestContextMiddleware
 from models import Base, Item
 from observability import setup_otel
@@ -28,11 +29,10 @@ OIDC_ISSUER = os.getenv(
     "http://keycloak.default.svc.cluster.local/realms/devops-lvlup",
 )
 OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID", "shopping-app")
+APP_ENV = os.getenv("APP_ENV", "dev")
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "shopping-app")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+setup_logging()
 logger = logging.getLogger("shopping-app")
 
 tracer = trace.get_tracer("shopping-app")
@@ -41,7 +41,13 @@ tracer = trace.get_tracer("shopping-app")
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
-    logger.info("app started | issuer=%s client_id=%s", OIDC_ISSUER, OIDC_CLIENT_ID)
+    logger.info(
+        "app_started",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+        },
+    )
 
 
 def get_correlation_id(request: Request) -> str:
@@ -129,11 +135,15 @@ def build_user_context(request: Request, payload: dict, correlation_id: str):
     run_id = get_run_id(request)
 
     logger.info(
-        "token auth context | run_id=%s correlation_id=%s user=%s roles=%s",
-        run_id,
-        correlation_id,
-        username,
-        roles,
+        "token_auth_context",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": run_id,
+            "correlation_id": correlation_id,
+            "user": username,
+            "roles": roles,
+        },
     )
 
     user_context = {
@@ -154,13 +164,15 @@ def get_user_from_token(
     run_id = get_run_id(request)
 
     logger.info(
-        "auth debug | run_id=%s correlation_id=%s has_authorization=%s has_x_auth_request_access_token=%s x_auth_request_user=%s",
-        run_id,
-        correlation_id,
-        bool(request.headers.get("authorization")),
-        bool(request.headers.get("x-auth-request-access-token")),
-        request.headers.get("x-auth-request-preferred-username")
-        or request.headers.get("x-auth-request-user"),
+        "auth_debug",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": run_id,
+            "correlation_id": correlation_id,
+            "method": request.method,
+            "path": request.url.path,
+        },
     )
 
     forwarded_access_token = (
@@ -187,10 +199,16 @@ def get_user_from_token(
 
     if username:
         logger.info(
-            "header auth context without token | run_id=%s correlation_id=%s user=%s",
-            run_id,
-            correlation_id,
-            username,
+            "header_auth_context_without_token",
+            extra={
+                "service": SERVICE_NAME,
+                "env": APP_ENV,
+                "run_id": run_id,
+                "correlation_id": correlation_id,
+                "user": username,
+                "method": request.method,
+                "path": request.url.path,
+            },
         )
         user_context = {
             "username": username,
@@ -202,11 +220,17 @@ def get_user_from_token(
         return user_context
 
     logger.warning(
-        "unauthorized | run_id=%s correlation_id=%s path=%s method=%s reason=missing_identity",
-        run_id,
-        correlation_id,
-        request.url.path,
-        request.method,
+        "unauthorized",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": run_id,
+            "correlation_id": correlation_id,
+            "status_code": 401,
+            "error_class": "MissingAuthenticationContext",
+            "method": request.method,
+            "path": request.url.path,
+        },
     )
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -219,12 +243,17 @@ def require_roles(*allowed_roles):
         user_roles = user["roles"]
         if not any(role in user_roles for role in allowed_roles):
             logger.warning(
-                "forbidden | run_id=%s correlation_id=%s user=%s roles=%s required_roles=%s",
-                user.get("run_id"),
-                user["correlation_id"],
-                user["username"],
-                user_roles,
-                list(allowed_roles),
+                "forbidden",
+                extra={
+                    "service": SERVICE_NAME,
+                    "env": APP_ENV,
+                    "run_id": user.get("run_id"),
+                    "correlation_id": user["correlation_id"],
+                    "status_code": 403,
+                    "error_class": "Forbidden",
+                    "user": user["username"],
+                    "roles": user_roles,
+                },
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -247,18 +276,21 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         content={"detail": exc.detail},
     )
 
-
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    with SessionLocal() as db:
-        items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
+    with tracer.start_as_current_span("home_logic") as span:
+        span.set_attribute("app.correlation_id", request.state.correlation_id)
+        if request.state.run_id:
+            span.set_attribute("app.run_id", request.state.run_id)
+
+        with SessionLocal() as db:
+            items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
 
     return templates.TemplateResponse(
         name="index.html",
         request=request,
         context={"items": items},
     )
-
 
 @app.post("/items")
 def add_item(
@@ -271,14 +303,18 @@ def add_item(
         db.commit()
 
     logger.info(
-        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
-        user.get("run_id"),
-        user["correlation_id"],
-        user["username"],
-        user["roles"],
-        request.method,
-        request.url.path,
-        303,
+        "allowed",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": user.get("run_id"),
+            "correlation_id": user["correlation_id"],
+            "status_code": 303,
+            "method": request.method,
+            "path": request.url.path,
+            "user": user["username"],
+            "roles": user["roles"],
+        },
     )
     return RedirectResponse(url="/", status_code=303)
 
@@ -296,14 +332,18 @@ def delete_item(
             db.commit()
 
     logger.info(
-        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
-        user.get("run_id"),
-        user["correlation_id"],
-        user["username"],
-        user["roles"],
-        request.method,
-        request.url.path,
-        303,
+        "allowed",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": user.get("run_id"),
+            "correlation_id": user["correlation_id"],
+            "status_code": 303,
+            "method": request.method,
+            "path": request.url.path,
+            "user": user["username"],
+            "roles": user["roles"],
+        },
     )
     return RedirectResponse(url="/", status_code=303)
 
@@ -323,17 +363,20 @@ def api_list_items(
             items = db.execute(select(Item).order_by(Item.id.desc())).scalars().all()
 
     logger.info(
-        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
-        user.get("run_id"),
-        user["correlation_id"],
-        user["username"],
-        user["roles"],
-        request.method,
-        request.url.path,
-        200,
+        "allowed",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": user.get("run_id"),
+            "correlation_id": user["correlation_id"],
+            "status_code": 200,
+            "method": request.method,
+            "path": request.url.path,
+            "user": user["username"],
+            "roles": user["roles"],
+        },
     )
     return [{"id": i.id, "name": i.name} for i in items]
-
 
 @app.post("/api/items", status_code=201)
 def api_add_item(
@@ -343,24 +386,48 @@ def api_add_item(
 ):
     name = (payload.get("name") or "").strip()
     if not name:
+        logger.warning(
+            "validation_failed",
+            extra={
+                "service": SERVICE_NAME,
+                "env": APP_ENV,
+                "run_id": user.get("run_id"),
+                "correlation_id": user["correlation_id"],
+                "status_code": 400,
+                "error_class": "ValidationError",
+                "method": request.method,
+                "path": request.url.path,
+                "user": user["username"],
+                "roles": user["roles"],
+            },
+        )
         return JSONResponse(status_code=400, content={"error": "name is required"})
 
-    with SessionLocal() as db:
-        db.add(Item(name=name))
-        db.commit()
+    with tracer.start_as_current_span("add_item_logic") as span:
+        span.set_attribute("app.correlation_id", request.state.correlation_id)
+        if request.state.run_id:
+            span.set_attribute("app.run_id", request.state.run_id)
+        span.set_attribute("app.user", user["username"])
+
+        with SessionLocal() as db:
+            db.add(Item(name=name))
+            db.commit()
 
     logger.info(
-        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
-        user.get("run_id"),
-        user["correlation_id"],
-        user["username"],
-        user["roles"],
-        request.method,
-        request.url.path,
-        201,
+        "allowed",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": user.get("run_id"),
+            "correlation_id": user["correlation_id"],
+            "status_code": 201,
+            "method": request.method,
+            "path": request.url.path,
+            "user": user["username"],
+            "roles": user["roles"],
+        },
     )
     return {"ok": True}
-
 
 @app.delete("/api/items/{item_id}")
 def api_delete_item(
@@ -375,13 +442,17 @@ def api_delete_item(
             db.commit()
 
     logger.info(
-        "allowed | run_id=%s correlation_id=%s user=%s roles=%s method=%s path=%s status=%s",
-        user.get("run_id"),
-        user["correlation_id"],
-        user["username"],
-        user["roles"],
-        request.method,
-        request.url.path,
-        200,
+        "allowed",
+        extra={
+            "service": SERVICE_NAME,
+            "env": APP_ENV,
+            "run_id": user.get("run_id"),
+            "correlation_id": user["correlation_id"],
+            "status_code": 200,
+            "method": request.method,
+            "path": request.url.path,
+            "user": user["username"],
+            "roles": user["roles"],
+        },
     )
     return {"ok": True, "deleted_id": item_id}

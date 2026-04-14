@@ -21,12 +21,16 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.correlation_id = correlation_id
 
         logger.info(
-            "incoming request | run_id=%s correlation_id=%s method=%s path=%s",
-            run_id,
-            correlation_id,
-            request.method,
-            request.url.path,
-        )
+    		"request_started",
+    		extra={
+        		"service": "shopping-app",
+        		"env": "dev",
+        		"run_id": run_id,
+        		"correlation_id": correlation_id,
+        		"method": request.method,
+        		"path": request.url.path,
+    		},
+	)
 
         status_code = 500
         error_class = None
@@ -55,16 +59,20 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 span.set_attribute("url.path", request.url.path)
 
             logger.info(
-                "request completed | run_id=%s correlation_id=%s trace_id=%s method=%s path=%s status_code=%s latency_ms=%s error_class=%s",
-                run_id,
-                correlation_id,
-                trace_id,
-                request.method,
-                request.url.path,
-                status_code,
-                latency_ms,
-                error_class,
-            )
+    		"request_completed",
+    		extra={
+        		"service": "shopping-app",
+        		"env": "dev",
+        		"run_id": run_id,
+        		"correlation_id": correlation_id,
+        		"trace_id": trace_id,
+        		"status_code": status_code,
+        		"error_class": error_class,
+        		"latency_ms": latency_ms,
+        		"method": request.method,
+        		"path": request.url.path,
+    		},
+	    )
 
         response.headers["X-Correlation-Id"] = correlation_id
         if run_id:
